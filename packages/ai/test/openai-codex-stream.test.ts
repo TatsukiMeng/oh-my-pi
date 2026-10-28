@@ -5,6 +5,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import {
 	buildTransformedCodexRequestBody,
 	createOpenAICodexCompatibilityMetadata,
+	CodexWebSocketTransportError,
 	getOpenAICodexTransportDetails,
 	getOpenAICodexWebSocketDebugStats,
 	openCodexCompactionEventStream,
@@ -6388,6 +6389,68 @@ describe("openai-codex streaming", () => {
 		expect(details.websocketDisabled).toBe(false);
 		expect(fetchMock).not.toHaveBeenCalled();
 	}, 15_000); // real handshake join; 5s default flakes under full-suite load
+
+	it.each(["before joining", "while waiting"] as const)(
+		"cancels a prewarm joiner %s without replacing its owner's handshake",
+		async phase => {
+			const token = createCodexTestToken();
+			const created = Promise.withResolvers<DeferredOpenWebSocket>();
+			const joined = Promise.withResolvers<void>();
+			let constructorCount = 0;
+			class DeferredOpenWebSocket extends MockWebSocket {
+				constructor(url: string, options?: WsOptions) {
+					super(url, options);
+					constructorCount += 1;
+					created.resolve(this);
+				}
+			}
+			global.WebSocket = DeferredOpenWebSocket as unknown as typeof WebSocket;
+			const model = createCodexTestModel("https://chatgpt.com/backend-api");
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const options = { apiKey: token, sessionId: "ws-cancelled-join-session", providerSessionState };
+			const owner = prewarmOpenAICodexResponses(model, options);
+			const socket = await created.promise;
+			const controller = new AbortController();
+			const reason = new Error("only the joining prewarm was cancelled");
+			const originalTime = piUtils.logger.time.bind(piUtils.logger);
+			const interceptTime = ((...args: Parameters<typeof originalTime>) => {
+				const result = originalTime(...args);
+				if (args[0] === "codexWs:awaitSharedHandshake") joined.resolve();
+				return result;
+			}) as typeof piUtils.logger.time;
+			const timeSpy = vi.spyOn(piUtils.logger, "time").mockImplementation(interceptTime);
+			try {
+				if (phase === "before joining") controller.abort(reason);
+				const joining = prewarmOpenAICodexResponses(model, { ...options, signal: controller.signal });
+				await Promise.race([
+					joined.promise,
+					joining.then(
+						() => undefined,
+						() => undefined,
+					),
+				]);
+				if (phase === "while waiting") controller.abort(reason);
+				expect(socket.readyState).toBe(MockWebSocket.CONNECTING);
+				queueMicrotask(() => {
+					socket.readyState = MockWebSocket.OPEN;
+					socket.emit("open", new Event("open"));
+				});
+				await expect(joining).rejects.toBeInstanceOf(CodexWebSocketTransportError);
+				await expect(joining).rejects.toMatchObject({ cause: reason });
+				await owner;
+				expect(constructorCount).toBe(1);
+				expect(getOpenAICodexTransportDetails(model, options)).toMatchObject({
+					websocketConnected: true,
+					websocketDisabled: false,
+					prewarmed: true,
+				});
+			} finally {
+				timeSpy.mockRestore();
+				for (const state of providerSessionState.values()) state.close?.();
+				await owner.catch(() => {});
+			}
+		},
+	);
 
 	it("surfaces a whitespace flood arriving after a delivered tool call instead of replaying", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");

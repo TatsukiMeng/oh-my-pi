@@ -21,8 +21,10 @@ import {
 	logger,
 	readSseJson,
 	structuredCloneJSON,
+	untilAborted,
 	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
+import { AbortError as SharedPromiseAbortError } from "@oh-my-pi/pi-utils/abortable";
 import * as AIError from "../error";
 import { parseToolCallArguments, replayableToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey } from "../env-api-key";
@@ -4112,7 +4114,14 @@ class CodexWebSocketConnection {
 		if (this.isOpen()) return;
 		if (this.#connectPromise) {
 			logger.time("codexWs:awaitSharedHandshake");
-			await this.#connectPromise;
+			try {
+				await untilAborted(signal, this.#connectPromise);
+			} catch (error) {
+				if (error instanceof SharedPromiseAbortError) {
+					throw new CodexWebSocketTransportError("request was aborted", { cause: error.cause });
+				}
+				throw error;
+			}
 			return;
 		}
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
@@ -4744,7 +4753,8 @@ async function getOrCreateCodexWebSocketConnection(
 		if (!pending || pending.isOpen() || !pending.isConnecting()) break;
 		try {
 			await pending.connect(signal);
-		} catch {
+		} catch (error) {
+			if (signal?.aborted) throw error;
 			// The handshake owner surfaces its own failure; re-evaluate below
 			// (state.connection may have been replaced or cleared).
 		}
