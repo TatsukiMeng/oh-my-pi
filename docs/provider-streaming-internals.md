@@ -103,6 +103,15 @@ Tool-call argument streaming:
 - providers that send only `response.function_call_arguments.done` still populate final args
 - tool call IDs are normalized as `"<call_id>|<item_id>"`
 
+### Connection-bound computer history
+
+On a connection-bound Responses target, fallback computer-tool metadata does not
+prove ownership of the original native item IDs. Ordinary request reconstruction
+uses visible action notes and screenshot input instead of native computer items.
+Remote compaction uses text history notes for both calls and results; screenshot
+references in those notes are text, not image input. Valid native provider
+payloads retain their existing replay behavior.
+
 ### OpenRouter native finish reasons
 
 Chat Completions and Responses treat explicit `native_finish_reason` values

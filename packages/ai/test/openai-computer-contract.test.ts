@@ -74,6 +74,57 @@ async function* events(items: unknown[]): AsyncIterable<ResponseStreamEvent> {
 }
 
 describe("OpenAI GA computer contract", () => {
+	test("keeps fallback actions and screenshot input without replaying connection-owned computer items", () => {
+		const direct = model("openai-responses");
+		const target = { ...direct, compat: { ...direct.compat, connectionBoundNativeHistory: true } };
+		const previous = assistant([
+			{
+				type: "toolCall",
+				id: "call_bound|cu_previous",
+				name: "computer",
+				arguments: { actions: [{ type: "click", button: "left", x: 12, y: 34 }] },
+				providerMetadata: {
+					type: "computer",
+					providerItemId: "cu_previous",
+					actions: [{ type: "click", button: "left", x: 12, y: 34 }],
+					pendingSafetyChecks: [],
+				},
+			},
+		]);
+		const screenshotUrl = "data:image/png;base64,AAEC";
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_bound|cu_previous",
+			toolName: "computer",
+			content: [],
+			isError: false,
+			timestamp: 2,
+			providerMetadata: {
+				type: "computer",
+				screenshot: { type: "computer_screenshot", image_url: screenshotUrl },
+				acknowledgedSafetyChecks: [],
+			},
+		};
+		const input = buildResponsesInput({
+			model: target,
+			context: { messages: [previous, result] },
+			strictResponsesPairing: true,
+			supportsImageDetailOriginal: false,
+		});
+		expect(input.some(item => item.type === "computer_call" || item.type === "computer_call_output")).toBe(false);
+		expect(input).toMatchObject([
+			{ type: "message", role: "assistant", content: expect.stringContaining("click") },
+			{
+				type: "message",
+				role: "user",
+				content: [
+					{ type: "input_text", text: expect.stringContaining("call_bound") },
+					{ type: "input_image", image_url: screenshotUrl },
+				],
+			},
+		]);
+	});
+
 	test("gates models and emits the exact native request tool and forced choice", () => {
 		const supported = model("openai-responses");
 		const unsupported = model("openai-responses", "gpt-5.3");
